@@ -1,0 +1,29 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment variables & secrets (CRITICAL: NEVER COMMIT SECRETS)
+.env
+*.env.local
+
+# Database & Docker storage data
+postgres_data/
+redis_data/
+
+# Next.js / Frontend builds
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+
+# OS / Editor artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
