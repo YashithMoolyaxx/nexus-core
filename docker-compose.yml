@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   nexus-db:
     image: postgres:16-alpine
@@ -45,6 +43,25 @@ services:
     restart: always
     ports:
       - "8000:8000"
+    volumes:
+      - ./backend:/workspace
+    env_file:
+      - .env
+    depends_on:
+      nexus-db:
+        condition: service_healthy
+      nexus-redis:
+        condition: service_healthy
+    networks:
+      - nexus-network
+
+  nexus-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nexus_worker
+    restart: always
+    command: celery -A app.workers.celery_app.celery_app worker --loglevel=info
     volumes:
       - ./backend:/workspace
     env_file:
