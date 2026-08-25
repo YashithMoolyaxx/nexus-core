@@ -3,6 +3,8 @@ from logging.config import fileConfig
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
+from app.models.project import Project  # Add this import alongside User
+from app.models.user import User
 from alembic import context
 
 from app.core.config import settings
