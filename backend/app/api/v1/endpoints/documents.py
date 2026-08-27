@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, get_tenant_session
+from app.core.ws_manager import ws_manager
 from app.models.document import WorkspaceDocument
 from app.models.user import User
 from app.schemas.document import DocumentCreate, DocumentResponse, DocumentUpdate
@@ -16,7 +17,7 @@ router = APIRouter()
     "/",
     response_model=DocumentResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Create document under active tenant (RLS Protected)",
+    summary="Create document under active tenant (RLS Protected + Broadcast)",
 )
 async def create_document(
     doc_in: DocumentCreate,
@@ -33,6 +34,14 @@ async def create_document(
     db.add(doc)
     await db.commit()
     await db.refresh(doc)
+
+    # Broadcast document creation across Redis Pub/Sub
+    await ws_manager.publish_event(
+        tenant_id=str(current_user.tenant_id),
+        event_type="DOCUMENT_CREATED",
+        data=DocumentResponse.model_validate(doc).model_dump(mode="json"),
+    )
+
     return doc
 
 
@@ -73,17 +82,19 @@ async def get_document(
 @router.put(
     "/{document_id}",
     response_model=DocumentResponse,
-    summary="Update document with Optimistic Concurrency Control (OCC)",
+    summary="Update document with Optimistic Concurrency Control (OCC) + Broadcast",
 )
 async def update_document_occ(
     document_id: uuid.UUID,
     doc_in: DocumentUpdate,
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_tenant_session)],
 ):
     """
     Atomic OCC Mutation:
     Increments version counter ONLY if current version matches expected version.
     Returns 409 Conflict if a concurrent write modified the state first.
+    Broadcasts state mutation to Redis Pub/Sub mesh upon success.
     """
     values_to_update = {
         "version": WorkspaceDocument.version + 1,
@@ -94,12 +105,11 @@ async def update_document_occ(
     if doc_in.content is not None:
         values_to_update["content"] = doc_in.content
 
-    # Atomic conditional update
     stmt = (
         update(WorkspaceDocument)
         .where(
             WorkspaceDocument.id == document_id,
-            WorkspaceDocument.version == doc_in.version,  # OCC guard
+            WorkspaceDocument.version == doc_in.version,
         )
         .values(**values_to_update)
         .returning(WorkspaceDocument)
@@ -109,7 +119,6 @@ async def update_document_occ(
     updated_doc = result.scalars().first()
 
     if not updated_doc:
-        # Fetch current record to verify whether it was deleted or had a version conflict
         check_query = select(WorkspaceDocument).where(WorkspaceDocument.id == document_id)
         check_res = await db.execute(check_query)
         existing_doc = check_res.scalars().first()
@@ -119,16 +128,22 @@ async def update_document_occ(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Document does not exist or has been deleted.",
             )
-        
-        # Concurrency race collision detected!
+
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
-                "message": "State Conflict: Document was modified by another operator.",
+                "message": "State Conflict: Document was modified concurrently.",
                 "current_version": existing_doc.version,
                 "attempted_version": doc_in.version,
             },
         )
 
     await db.commit()
+
+    await ws_manager.publish_event(
+        tenant_id=str(current_user.tenant_id),
+        event_type="DOCUMENT_UPDATED",
+        data=DocumentResponse.model_validate(updated_doc).model_dump(mode="json"),
+    )
+
     return updated_doc
