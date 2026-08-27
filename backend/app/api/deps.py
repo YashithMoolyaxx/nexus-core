@@ -1,77 +1,81 @@
+from typing import Annotated, AsyncGenerator
 import uuid
-from typing import Annotated
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
-from app.core.database import get_db
+from app.core.database import AsyncSessionLocal, get_db
 from app.models.user import User, UserRole
 from app.schemas.token import TokenPayload
 
-# HTTPBearer provides a clean "Bearer <token>" input box in Swagger UI
-security = HTTPBearer()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login")
 
 
 async def get_current_user(
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    token: Annotated[str, Depends(oauth2_scheme)],
 ) -> User:
-    """Decodes JWT access token from Authorization header and returns User."""
-    token = credentials.credentials
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials or token expired.",
         headers={"WWW-Authenticate": "Bearer"},
     )
-
     try:
         payload = jwt.decode(
-            token,
-            settings.SECRET_KEY,
-            algorithms=[settings.ALGORITHM],
+            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
         )
-        user_id: str = payload.get("sub")
-        token_type: str = payload.get("type")
-
-        if user_id is None or token_type != "access":
+        token_data = TokenPayload(**payload)
+        if token_data.type != "access" or token_data.sub is None:
             raise credentials_exception
-
-        token_data = TokenPayload(
-            sub=user_id,
-            role=payload.get("role"),
-            type=token_type,
-        )
-    except JWTError:
+    except (JWTError, Exception):
         raise credentials_exception
 
     query = select(User).where(User.id == uuid.UUID(token_data.sub))
     result = await db.execute(query)
     user = result.scalars().first()
 
-    if user is None:
+    if user is None or not user.is_active:
         raise credentials_exception
-
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Inactive user account.",
-        )
-
     return user
 
 
 class RoleChecker:
-    """Dependency factory to enforce Role-Based Access Control (RBAC)."""
-
     def __init__(self, allowed_roles: list[UserRole]):
         self.allowed_roles = allowed_roles
 
-    def __call__(self, current_user: Annotated[User, Depends(get_current_user)]) -> User:
-        if current_user.role not in self.allowed_roles:
+    def __call__(self, user: Annotated[User, Depends(get_current_user)]) -> User:
+        if user.role not in self.allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Operation not permitted. Required roles: {[r.value for r in self.allowed_roles]}",
+                detail="You do not have required permissions to perform this action.",
             )
-        return current_user
+        return user
+
+
+async def get_tenant_session(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> AsyncGenerator[AsyncSession, None]:
+    """
+    Yields an AsyncSession with PostgreSQL RLS tenant context pre-configured.
+    Guarantees kernel-level data isolation.
+    """
+    if not current_user.tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User is not assigned to a tenant organization.",
+        )
+
+    session = AsyncSessionLocal()
+    try:
+        # Inject tenant_id into the PostgreSQL transaction state for RLS
+        await session.execute(
+            text(f"SET LOCAL app.current_tenant_id = '{str(current_user.tenant_id)}';")
+        )
+        yield session
+    except Exception:
+        await session.rollback()
+        raise
+    finally:
+        await session.close()

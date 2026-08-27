@@ -3,17 +3,19 @@ from logging.config import fileConfig
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
-from app.models.project import Project  # Add this import alongside User
+from app.models.project import Project  
 from app.models.user import User
 from alembic import context
+from app.models.document import WorkspaceDocument
+from app.models.project import Project
+from app.models.tenant import Tenant
 
 from app.core.config import settings
 from app.core.database import Base
-from app.models.user import User  # Registers User model with metadata
+from app.models.user import User  
 
 config = context.config
 
-# Inject database URL directly from app settings
 config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
 
 if config.config_file_name is not None:
