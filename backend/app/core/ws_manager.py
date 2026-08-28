@@ -14,7 +14,6 @@ class ConnectionManager:
     """
 
     def __init__(self):
-        # Local mapping: { tenant_id: { websocket_connection, ... } }
         self.active_connections: Dict[str, Set[WebSocket]] = {}
         self.redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
         self.pubsub = self.redis_client.pubsub()

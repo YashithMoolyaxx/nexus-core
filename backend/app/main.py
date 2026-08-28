@@ -12,10 +12,10 @@ from app.core.ws_manager import ws_manager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-  
+   
     await ws_manager.start_redis_listener()
     yield
-   
+
     if ws_manager.listener_task:
         ws_manager.listener_task.cancel()
 
