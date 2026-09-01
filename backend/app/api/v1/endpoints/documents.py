@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, get_db, require_developer, require_viewer
 from app.core.ws_manager import ws_manager
 from app.models.document import WorkspaceDocument
-from app.models.user import User, UserRole
+from app.models.user import User
 from app.schemas.document import (
     DocumentCreate,
     DocumentResponse,
@@ -29,6 +29,7 @@ async def list_documents(
 ):
     query = (
         select(WorkspaceDocument)
+        .where(WorkspaceDocument.tenant_id == current_user.tenant_id)
         .offset(skip)
         .limit(limit)
         .order_by(WorkspaceDocument.updated_at.desc())
@@ -57,25 +58,24 @@ async def create_document(
     document = WorkspaceDocument(
         title=doc_in.title,
         content=doc_in.content,
-        project_id=doc_in.project_id,
         tenant_id=current_user.tenant_id,
+        created_by=current_user.id,
         version=1,
     )
     db.add(document)
     await db.commit()
     await db.refresh(document)
 
-    await ws_manager.broadcast_to_tenant(
+    await ws_manager.publish_event(
         tenant_id=str(current_user.tenant_id),
-        message={
-            "event": "DOCUMENT_CREATED",
-            "data": {
-                "id": str(document.id),
-                "title": document.title,
-                "content": document.content,
-                "version": document.version,
-                "tenant_id": str(document.tenant_id),
-            },
+        event_type="DOCUMENT_CREATED",
+        data={
+            "id": str(document.id),
+            "title": document.title,
+            "content": document.content,
+            "version": document.version,
+            "tenant_id": str(document.tenant_id),
+            "created_by": str(document.created_by) if document.created_by else None,
         },
     )
 
@@ -92,7 +92,10 @@ async def get_document(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_viewer)],
 ):
-    query = select(WorkspaceDocument).where(WorkspaceDocument.id == document_id)
+    query = select(WorkspaceDocument).where(
+        WorkspaceDocument.id == document_id,
+        WorkspaceDocument.tenant_id == current_user.tenant_id,
+    )
     result = await db.execute(query)
     doc = result.scalars().first()
 
@@ -115,7 +118,10 @@ async def update_document(
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(require_developer)],
 ):
-    query = select(WorkspaceDocument).where(WorkspaceDocument.id == document_id)
+    query = select(WorkspaceDocument).where(
+        WorkspaceDocument.id == document_id,
+        WorkspaceDocument.tenant_id == current_user.tenant_id,
+    )
     result = await db.execute(query)
     doc = result.scalars().first()
 
@@ -142,17 +148,16 @@ async def update_document(
     await db.commit()
     await db.refresh(doc)
 
-    await ws_manager.broadcast_to_tenant(
+    await ws_manager.publish_event(
         tenant_id=str(current_user.tenant_id),
-        message={
-            "event": "DOCUMENT_UPDATED",
-            "data": {
-                "id": str(doc.id),
-                "title": doc.title,
-                "content": doc.content,
-                "version": doc.version,
-                "tenant_id": str(doc.tenant_id),
-            },
+        event_type="DOCUMENT_UPDATED",
+        data={
+            "id": str(doc.id),
+            "title": doc.title,
+            "content": doc.content,
+            "version": doc.version,
+            "tenant_id": str(doc.tenant_id),
+            "created_by": str(doc.created_by) if doc.created_by else None,
         },
     )
 

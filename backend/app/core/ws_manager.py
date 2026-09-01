@@ -1,6 +1,5 @@
 import asyncio
 import json
-import uuid
 from typing import Dict, Set
 from fastapi import WebSocket
 import redis.asyncio as aioredis
@@ -38,14 +37,14 @@ class ConnectionManager:
         except Exception as e:
             print(f"Redis Pub/Sub Reader Error: {e}")
 
-    async def connect(self, tenant_id: str, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket, tenant_id: str):
         """Registers a newly authenticated WebSocket connection."""
         await websocket.accept()
         if tenant_id not in self.active_connections:
             self.active_connections[tenant_id] = set()
         self.active_connections[tenant_id].add(websocket)
 
-    def disconnect(self, tenant_id: str, websocket: WebSocket):
+    def disconnect(self, websocket: WebSocket, tenant_id: str):
         """Purges a disconnected WebSocket connection from memory."""
         if tenant_id in self.active_connections:
             self.active_connections[tenant_id].discard(websocket)
@@ -63,7 +62,16 @@ class ConnectionManager:
             "tenant_id": tenant_id,
             "data": data,
         }
-        await self.redis_client.publish(channel, json.dumps(message, default=str))
+        try:
+            await self.redis_client.publish(channel, json.dumps(message, default=str))
+        except Exception:
+            pass
+
+    async def broadcast_to_tenant(self, tenant_id: str, message: dict):
+        """Compatibility alias for direct payload broadcasting."""
+        event_type = message.get("event", "GENERIC_EVENT")
+        data = message.get("data", message)
+        await self.publish_event(tenant_id, event_type, data)
 
     async def _broadcast_to_local_sockets(self, tenant_id: str, payload: dict):
         """Broadcasts payload to WebSockets connected to THIS server instance."""
@@ -75,7 +83,7 @@ class ConnectionManager:
                 except Exception:
                     dead_sockets.add(ws)
             for dead_ws in dead_sockets:
-                self.disconnect(tenant_id, dead_ws)
+                self.disconnect(dead_ws, tenant_id)
 
 
 ws_manager = ConnectionManager()
