@@ -1,92 +1,54 @@
-from typing import Annotated, Any
-from celery.result import AsyncResult
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from app.api.deps import get_current_user
+from celery.result import AsyncResult
+from app.api.deps import get_current_user, require_admin
+from app.core.celery_app import celery_app
 from app.models.user import User
-from app.workers.celery_app import celery_app
-from app.workers.tasks import process_data_analytics, send_welcome_notification
+from app.tasks.analytics import process_dataset_analytics
 
 router = APIRouter()
 
 
-class AnalyticsTaskRequest(BaseModel):
-    record_count: int = Field(..., ge=1, le=100000)
+class TaskTriggerRequest(BaseModel):
+    record_count: int = Field(15000, ge=1000, le=100000, description="Volume of records to process")
 
 
-class TaskResponse(BaseModel):
+class TaskTriggerResponse(BaseModel):
     task_id: str
     status: str
     message: str
 
 
 @router.post(
-    "/send-welcome",
-    response_model=TaskResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    summary="Enqueue async welcome notification",
-)
-async def trigger_welcome_email(
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> Any:
-    """
-    Enqueues an asynchronous welcome notification to the Celery queue.
-    Returns HTTP 202 Accepted immediately.
-    """
- 
-    task = send_welcome_notification.delay(
-        email=current_user.email,
-        username=current_user.username,
-    )
-    return {
-        "task_id": task.id,
-        "status": "ENQUEUED",
-        "message": "Welcome notification dispatched to background queue.",
-    }
-
-
-@router.post(
     "/run-analytics",
-    response_model=TaskResponse,
+    response_model=TaskTriggerResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Enqueue heavy analytics calculation",
+    summary="Enqueue Heavy Statistical Analytics Task (Requires Admin role)",
 )
-async def trigger_analytics_job(
-    payload: AnalyticsTaskRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> Any:
-    """
-    Offloads data aggregation processing to a Celery worker.
-    """
-    task = process_data_analytics.delay(record_count=payload.record_count)
+async def run_analytics(
+    payload: TaskTriggerRequest,
+    current_user: User = Depends(require_admin),
+):
+    task = process_dataset_analytics.delay(record_count=payload.record_count)
     return {
         "task_id": task.id,
-        "status": "ENQUEUED",
-        "message": "Analytics job enqueued for asynchronous processing.",
+        "status": "QUEUED",
+        "message": f"Dispatched async batch analytics for {payload.record_count:,} records.",
     }
 
 
 @router.get(
     "/status/{task_id}",
-    summary="Query background task execution status",
+    summary="Poll Background Task Execution State",
 )
-async def get_task_status(
-    task_id: str,
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> dict:
-    """
-    Fetches real-time task status and computed results from Celery Result Backend.
-    """
+async def get_task_status(task_id: str):
     task_result = AsyncResult(task_id, app=celery_app)
-    
     response = {
         "task_id": task_id,
         "status": task_result.status,
     }
-
-    if task_result.successful():
+    if task_result.status == "SUCCESS":
         response["result"] = task_result.result
-    elif task_result.failed():
+    elif task_result.status == "FAILURE":
         response["error"] = str(task_result.result)
-
     return response

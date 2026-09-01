@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -6,14 +6,19 @@
 
 :root {
   font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 body {
   margin: 0;
-  background-color: #030712;
-  color: #f9fafb;
+  background-color: #faf5ff;
+  color: #2e1065;
   overflow-x: hidden;
+}
+
+::selection {
+  background-color: #fbcfe8;
+  color: #831843;
 }
 
 ::-webkit-scrollbar {
@@ -21,14 +26,14 @@ body {
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #0b0f19;
+  background: #faf5ff;
 }
 ::-webkit-scrollbar-thumb {
-  background: #1f2937;
+  background: #e9d5ff;
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #374151;
+  background: #d8b4fe;
 }
 
 .font-mono {

@@ -1,30 +1,35 @@
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Union
 import bcrypt
 from jose import jwt
 from app.core.config import settings
 
 
-def hash_password(password: str) -> str:
-    """Hashes a plain-text password using native bcrypt."""
-    pwd_bytes = password.encode("utf-8")
-    salt = bcrypt.gensalt()
-    return bcrypt.hashpw(pwd_bytes, salt).decode("utf-8")
-
-
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verifies a plain-text password against a stored bcrypt hash."""
-    password_bytes = plain_password.encode("utf-8")
-    hashed_bytes = hashed_password.encode("utf-8")
-    return bcrypt.checkpw(password_bytes, hashed_bytes)
+    """Safely verifies a plain-text password against a stored Bcrypt hash."""
+    try:
+        if not plain_password or not hashed_password:
+            return False
+        password_bytes = plain_password.encode("utf-8")
+        hashed_bytes = hashed_password.encode("utf-8")
+        return bcrypt.checkpw(password_bytes, hashed_bytes)
+    except Exception:
+        return False
+
+
+def get_password_hash(password: str) -> str:
+    """Generates a Bcrypt salt and hash string."""
+    password_bytes = password.encode("utf-8")
+    salt = bcrypt.gensalt(rounds=12)
+    return bcrypt.hashpw(password_bytes, salt).decode("utf-8")
 
 
 def create_access_token(
-    subject: str | Any,
-    role: str,
+    subject: Union[str, Any],
+    role: str = "developer",
     expires_delta: timedelta | None = None,
 ) -> str:
-    """Generates an HMAC-SHA256 signed JWT access token."""
+    """Generates a signed JWT access token."""
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
@@ -38,17 +43,14 @@ def create_access_token(
         "role": role,
         "type": "access",
     }
-
-    return jwt.encode(
-        to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM
-    )
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
 def create_refresh_token(
-    subject: str | Any,
+    subject: Union[str, Any],
     expires_delta: timedelta | None = None,
 ) -> str:
-    """Generates a long-lived JWT refresh token."""
+    """Generates a signed JWT refresh token."""
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
@@ -61,7 +63,4 @@ def create_refresh_token(
         "sub": str(subject),
         "type": "refresh",
     }
-
-    return jwt.encode(
-        to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM
-    )
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)

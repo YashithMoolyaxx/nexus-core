@@ -1,61 +1,85 @@
-from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, List
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, update
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.api.deps import get_current_user, get_tenant_session
+from app.api.deps import get_current_user, get_db, require_developer, require_viewer
 from app.core.ws_manager import ws_manager
 from app.models.document import WorkspaceDocument
-from app.models.user import User
-from app.schemas.document import DocumentCreate, DocumentResponse, DocumentUpdate
+from app.models.user import User, UserRole
+from app.schemas.document import (
+    DocumentCreate,
+    DocumentResponse,
+    DocumentUpdate,
+)
 
 router = APIRouter()
+
+
+@router.get(
+    "/",
+    response_model=List[DocumentResponse],
+    summary="List tenant documents (Enforced by PostgreSQL RLS)",
+)
+async def list_documents(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_viewer)],
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+):
+    query = (
+        select(WorkspaceDocument)
+        .offset(skip)
+        .limit(limit)
+        .order_by(WorkspaceDocument.updated_at.desc())
+    )
+    result = await db.execute(query)
+    return result.scalars().all()
 
 
 @router.post(
     "/",
     response_model=DocumentResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Create document under active tenant (RLS Protected + Broadcast)",
+    summary="Create document (Requires Developer or Admin role)",
 )
 async def create_document(
     doc_in: DocumentCreate,
-    current_user: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_tenant_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_developer)],
 ):
-    doc = WorkspaceDocument(
+    if not current_user.tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User does not belong to any tenant workspace.",
+        )
+
+    document = WorkspaceDocument(
         title=doc_in.title,
         content=doc_in.content,
+        project_id=doc_in.project_id,
         tenant_id=current_user.tenant_id,
-        created_by=current_user.id,
         version=1,
     )
-    db.add(doc)
+    db.add(document)
     await db.commit()
-    await db.refresh(doc)
+    await db.refresh(document)
 
-    # Broadcast document creation across Redis Pub/Sub
-    await ws_manager.publish_event(
+    await ws_manager.broadcast_to_tenant(
         tenant_id=str(current_user.tenant_id),
-        event_type="DOCUMENT_CREATED",
-        data=DocumentResponse.model_validate(doc).model_dump(mode="json"),
+        message={
+            "event": "DOCUMENT_CREATED",
+            "data": {
+                "id": str(document.id),
+                "title": document.title,
+                "content": document.content,
+                "version": document.version,
+                "tenant_id": str(document.tenant_id),
+            },
+        },
     )
 
-    return doc
-
-
-@router.get(
-    "/",
-    response_model=list[DocumentResponse],
-    summary="List all documents in tenant (PostgreSQL RLS Filtered)",
-)
-async def list_documents(
-    db: Annotated[AsyncSession, Depends(get_tenant_session)],
-):
-    query = select(WorkspaceDocument).order_by(WorkspaceDocument.created_at.desc())
-    result = await db.execute(query)
-    return result.scalars().all()
+    return document
 
 
 @router.get(
@@ -65,7 +89,8 @@ async def list_documents(
 )
 async def get_document(
     document_id: uuid.UUID,
-    db: Annotated[AsyncSession, Depends(get_tenant_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_viewer)],
 ):
     query = select(WorkspaceDocument).where(WorkspaceDocument.id == document_id)
     result = await db.execute(query)
@@ -74,7 +99,7 @@ async def get_document(
     if not doc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document not found within your tenant workspace.",
+            detail="Document not found within active tenant workspace.",
         )
     return doc
 
@@ -82,68 +107,53 @@ async def get_document(
 @router.put(
     "/{document_id}",
     response_model=DocumentResponse,
-    summary="Update document with Optimistic Concurrency Control (OCC) + Broadcast",
+    summary="Atomic OCC Update (Requires Developer or Admin role)",
 )
-async def update_document_occ(
+async def update_document(
     document_id: uuid.UUID,
     doc_in: DocumentUpdate,
-    current_user: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_tenant_session)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(require_developer)],
 ):
-    """
-    Atomic OCC Mutation:
-    Increments version counter ONLY if current version matches expected version.
-    Returns 409 Conflict if a concurrent write modified the state first.
-    Broadcasts state mutation to Redis Pub/Sub mesh upon success.
-    """
-    values_to_update = {
-        "version": WorkspaceDocument.version + 1,
-        "updated_at": datetime.now(timezone.utc),
-    }
-    if doc_in.title is not None:
-        values_to_update["title"] = doc_in.title
-    if doc_in.content is not None:
-        values_to_update["content"] = doc_in.content
+    query = select(WorkspaceDocument).where(WorkspaceDocument.id == document_id)
+    result = await db.execute(query)
+    doc = result.scalars().first()
 
-    stmt = (
-        update(WorkspaceDocument)
-        .where(
-            WorkspaceDocument.id == document_id,
-            WorkspaceDocument.version == doc_in.version,
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found within active tenant workspace.",
         )
-        .values(**values_to_update)
-        .returning(WorkspaceDocument)
-    )
 
-    result = await db.execute(stmt)
-    updated_doc = result.scalars().first()
-
-    if not updated_doc:
-        check_query = select(WorkspaceDocument).where(WorkspaceDocument.id == document_id)
-        check_res = await db.execute(check_query)
-        existing_doc = check_res.scalars().first()
-
-        if not existing_doc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Document does not exist or has been deleted.",
-            )
-
+    if doc.version != doc_in.version:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
-                "message": "State Conflict: Document was modified concurrently.",
-                "current_version": existing_doc.version,
-                "attempted_version": doc_in.version,
+                "message": "Optimistic Concurrency Conflict: Document was modified by another operator.",
+                "current_version": doc.version,
+                "submitted_version": doc_in.version,
             },
         )
 
-    await db.commit()
+    doc.title = doc_in.title
+    doc.content = doc_in.content
+    doc.version += 1
 
-    await ws_manager.publish_event(
+    await db.commit()
+    await db.refresh(doc)
+
+    await ws_manager.broadcast_to_tenant(
         tenant_id=str(current_user.tenant_id),
-        event_type="DOCUMENT_UPDATED",
-        data=DocumentResponse.model_validate(updated_doc).model_dump(mode="json"),
+        message={
+            "event": "DOCUMENT_UPDATED",
+            "data": {
+                "id": str(doc.id),
+                "title": doc.title,
+                "content": doc.content,
+                "version": doc.version,
+                "tenant_id": str(doc.tenant_id),
+            },
+        },
     )
 
-    return updated_doc
+    return doc

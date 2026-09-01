@@ -1,6 +1,4 @@
 from typing import AsyncGenerator
-import uuid
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,

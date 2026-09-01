@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -12,12 +13,21 @@ from app.core.ws_manager import ws_manager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-   
-    await ws_manager.start_redis_listener()
+    # Safely start Redis Pub/Sub background reader
+    try:
+        await ws_manager.start_redis_listener()
+    except Exception as e:
+        print(f"Warning: Redis Pub/Sub listener failed to initialize: {e}")
+    
     yield
-
-    if ws_manager.listener_task:
+    
+    # Graceful shutdown
+    if ws_manager.listener_task and not ws_manager.listener_task.done():
         ws_manager.listener_task.cancel()
+        try:
+            await ws_manager.listener_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(
@@ -28,6 +38,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# 1. CORS Middleware (Must be added FIRST so preflight checks pass)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -41,7 +52,10 @@ app.add_middleware(
     expose_headers=["X-Request-ID"],
 )
 
+# 2. Custom Enterprise Middleware
 app.add_middleware(EnterpriseMiddleware)
+
+# 3. API Router
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
 
@@ -57,7 +71,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 async def database_exception_handler(request: Request, exc: SQLAlchemyError):
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"error": "Database Error", "message": "Database query failed."},
+        content={"error": "Database Error", "message": "Database operation failed."},
     )
 
 
