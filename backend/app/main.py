@@ -18,16 +18,20 @@ async def lifespan(app: FastAPI):
         await ws_manager.start_redis_listener()
     except Exception as e:
         print(f"Warning: Redis Pub/Sub listener failed to initialize: {e}")
-    
+
     yield
-    
-    # Graceful shutdown
+
+    # Graceful shutdown: cancel listener task
     if ws_manager.listener_task and not ws_manager.listener_task.done():
         ws_manager.listener_task.cancel()
         try:
             await ws_manager.listener_task
         except asyncio.CancelledError:
             pass
+
+    # Gracefully close Redis client connection pool
+    if hasattr(ws_manager, "redis_client") and ws_manager.redis_client:
+        await ws_manager.redis_client.close()
 
 
 app = FastAPI(
@@ -38,13 +42,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# 1. CORS Middleware (Must be added FIRST so preflight checks pass)
+# 1. CORS Middleware (Must be added FIRST so preflight OPTIONS checks pass)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
+        "http://127.0.0.1:3000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -52,10 +57,10 @@ app.add_middleware(
     expose_headers=["X-Request-ID"],
 )
 
-# 2. Custom Enterprise Middleware
+# 2. Custom Enterprise Middleware (Tracing, Rate Limiting, WS bypass)
 app.add_middleware(EnterpriseMiddleware)
 
-# 3. API Router
+# 3. Mount API v1 Routes
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
 
@@ -77,4 +82,8 @@ async def database_exception_handler(request: Request, exc: SQLAlchemyError):
 
 @app.get("/health", tags=["System Health"])
 async def health_check():
-    return {"status": "healthy", "service": "nexus-backend", "version": "1.0.0"}
+    return {
+        "status": "healthy",
+        "service": "nexus-backend",
+        "version": "2.0.0",
+    }

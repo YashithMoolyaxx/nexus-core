@@ -1,37 +1,35 @@
-import json
 import redis.asyncio as aioredis
 from app.core.config import settings
 
 redis_presence = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
-class PresenceService:
-    """Manages active user heartbeats with zero database load using Redis TTLs."""
+async def register_presence(tenant_id: str, user_id: str, username: str):
+    """Registers ephemeral user presence with a 30-second sliding TTL."""
+    key = f"presence:{tenant_id}:{user_id}"
+    await redis_presence.setex(key, 30, username)
 
-    @staticmethod
-    async def heartbeat(tenant_id: str, user_id: str, username: str) -> None:
-        """Sets an ephemeral heartbeat key that expires automatically in 15 seconds."""
-        key = f"presence:{tenant_id}:{user_id}"
-        payload = json.dumps({"user_id": user_id, "username": username})
-        await redis_presence.set(key, payload, ex=15)
 
-    @staticmethod
-    async def remove(tenant_id: str, user_id: str) -> None:
-        """Explicitly purges user presence on clean disconnect."""
-        key = f"presence:{tenant_id}:{user_id}"
-        await redis_presence.delete(key)
+async def refresh_presence(tenant_id: str, user_id: str, username: str):
+    """Refreshes presence key TTL on WebSocket heartbeat."""
+    key = f"presence:{tenant_id}:{user_id}"
+    await redis_presence.setex(key, 30, username)
 
-    @staticmethod
-    async def get_active_users(tenant_id: str) -> list[dict]:
-        """Scans and retrieves all active operators within the given tenant workspace."""
-        pattern = f"presence:{tenant_id}:*"
-        keys = []
-        async for k in redis_presence.scan_iter(match=pattern):
-            keys.append(k)
 
-        if not keys:
-            return []
+async def unregister_presence(tenant_id: str, user_id: str):
+    """Purges ephemeral presence key upon socket disconnection."""
+    key = f"presence:{tenant_id}:{user_id}"
+    await redis_presence.delete(key)
 
-        values = await redis_presence.mget(keys)
-        active_users = [json.loads(v) for v in values if v is not None]
-        return active_users
+
+async def get_active_tenant_operators(tenant_id: str):
+    """Retrieves all active ephemeral operators currently online in this tenant."""
+    pattern = f"presence:{tenant_id}:*"
+    keys = await redis_presence.keys(pattern)
+    operators = []
+    for k in keys:
+        user_id = k.split(":")[-1]
+        username = await redis_presence.get(k)
+        if username:
+            operators.append({"user_id": user_id, "username": username})
+    return operators
